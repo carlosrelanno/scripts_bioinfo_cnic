@@ -1,3 +1,3 @@
-# scripts_bioinfo_cnic
+# Bioinfo unit scripts
 
-Useful scripts for working at bioinfo unit
+Useful scripts for working at bioinfo unit: analysis, cluster...
