@@ -1,0 +1,2390 @@
+---
+title: "Single Cell Laura Lalaguna Integrated"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document: 
+    self_contained: no
+    number_sections: yes
+    toc: yes
+    toc_depth: 6
+    toc_float:
+      collapsed: no
+---
+
+```{r setup, include=F}
+toInclude <- F
+projectPath <- file.path("/data3/crelanor/SC.analysis.cluster/Integrated_analysis_merge")
+analysisDir <- "SC.Analysis"
+analysisPath <- file.path(projectPath,analysisDir)
+outputDir <- "SC.Analysis.output"
+outputPath <- file.path(analysisPath,outputDir)
+dataDir <- "data"
+dataPath <- file.path(projectPath,dataDir)
+
+prefix <- "SC.Analysis.Integrate.m"
+dir.create(file.path(outputPath),recursive = T)
+
+setwd(analysisPath)
+
+knitr::opts_knit$set(
+  base.dir = file.path(outputPath),
+  self.contained = F
+)
+
+knitr::opts_chunk$set(
+    dev = c("jpeg","pdf"),
+	  dpi = 300,
+    echo = F,
+    fig.align = "center",
+    fig.pos = "H",
+    message = F,
+    warning = F,
+    comment = NA
+)
+# knitr::opts_knit$set(root.dir = file.path(outputPath,'/SCENIC/SMC/'))
+```
+
+```{r functions, include=FALSE}
+# Sys.setenv(JAVA_HOME="C:/Program Files (x86)/Java/jre1.8.0_271/")
+
+suppressMessages(library(Seurat))
+suppressMessages(library(scater))
+suppressMessages(library(SingleR))
+suppressMessages(library(biomaRt))
+suppressMessages(library(ReactomePA))
+suppressMessages(library(enrichR))
+# suppressMessages(library(SCENIC))
+# suppressMessages(library(AUCell))
+suppressMessages(library(scDblFinder))
+
+suppressMessages(library(clustree))
+suppressMessages(library(tidyverse))
+suppressMessages(library(reshape2))
+suppressMessages(library(openxlsx))
+
+suppressMessages(library(DT))
+suppressMessages(library(kableExtra))
+suppressMessages(library(slickR))
+suppressMessages(library(gtools))
+suppressMessages(library(Matrix))
+
+suppressMessages(library(RColorBrewer))
+suppressMessages(library(gplots))
+suppressMessages(library(ComplexHeatmap))
+suppressMessages(library(circlize))
+suppressMessages(library(VennDiagram))
+suppressMessages(library(gridExtra))
+suppressMessages(library(ggrepel))
+suppressMessages(library(ggridges))
+suppressMessages(library(dplyr))
+
+source(file.path("helperFunctions.V4.R"))
+
+```
+
+# Experiment design
+
+Isolated Nuclei from Mice right ventricle heart samples at 5, 10 and 16 weeks post natal.
+
+Pools of 3 mice.
+
+Two conditions:
+
+Over-expression of a mutant (Mut) version of HUMAN TMEM43v versus a control (WT) version in Cardiomyocites
+
+Transgene carries SV40 polyA.
+
+The transgene has been added to the reference.
+
+
+```{r SCAV4.Lalaguna.Integrated.merge-1, include=FALSE}
+commonName <- "mouse"
+wspecies <- "Mus_musculus"
+sp <- "mmusculus"
+spGeneNames <- "mgi_symbol"
+
+genebuildVersion <- "98"
+genomeVersion <- "GRCm38"
+archive <- "sep2019.archive"
+
+suppressMessages(library(org.Mm.eg.db))
+# https://www.wikigenes.org/e/gene/e/3043.html
+wikiUrl <- "https://www.wikigenes.org/e/gene/e/"
+# http://www.genecards.org/cgi-bin/carddisp.pl?gene=HBB
+geneCardUrl <- "http://www.genecards.org/cgi-bin/carddisp.pl?gene="
+# http://mar2016.archive.ensembl.org/Mus_musculus/Gene/Summary?db=core;g=ENSMUSG00000078674
+ensemblUrl <- paste("http://",archive,".ensembl.org/",wspecies,"/Gene/Summary?db=core;g=",sep="")
+# http://www.informatics.jax.org/marker/MGI:101787
+#mgiUrl <- "http://www.informatics.jax.org/marker/"
+# http://www.uniprot.org/uniprot/A2BIM8
+uniprotUrl <- "http://www.uniprot.org/uniprot/"
+
+
+if (file.exists(file.path(outputPath,paste("genesMetadata",archive,"rds",sep=".")))) {
+  
+  message(paste("Load genesMetadata from file:",file.path(outputPath,paste("genesMetadata",archive,"rds",sep="."))))
+  genesMetadata <- readRDS(file = file.path(outputPath,paste("genesMetadata",archive,"rds",sep=".")))
+}
+```
+
+
+# Seurat Analysis Using All cells from the 6 Samples
+
+The seurat object is created without the filtered cells.
+
+For final analysis we have removed MT and HBB genes, so they won't have an effect on the clustering.
+
+Also rRNA genes GM42418 and AY036118, so they won't have an effect on the clustering.
+
+I have removed also the transgene altough it-s expression is maintained as a log2 normalized counts in the column log2_norm_Tdt_counts of the metadata table .
+
+I have left the ribosomic protein_coding genes that can be removed also in case they affect clustering in undesired way.
+
+A filtering of genes is applied also removing those present in less than 10 cells.
+
+Doublets were removed for each timepoint.
+
+
+# Integration via RPCA
+
+RPCA integration method from Seurat was used to merge the three experiments
+
+```{r SCAV4.Lalaguna.Integrated.merge-2}
+cellSet <- "Heart"
+subsetName <- "RPCA.Integrated"
+```
+
+
+```{r SCAV4.Lalaguna.Integrated.merge-3}
+if (file.exists(file.path(outputPath,paste(prefix,subsetName,cellSet,"seuratSC","Final","rds",sep=".")))){
+  seuratSC <- readRDS(file.path(outputPath,paste(prefix,subsetName,cellSet,"seuratSC","Final","rds",sep=".")))
+}else{
+  list.seurat <- SplitObject(seuratSC, split.by = "timepoint")
+
+# normalize and identify variable features for each dataset independently
+  list.seurat <- lapply(X = list.seurat, FUN = function(x) {
+    x <- NormalizeData(x)
+    x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+# select features that are repeatedly variable across datasets for integration run PCA on each
+# dataset using these features
+  features <- SelectIntegrationFeatures(object.list = list.seurat)
+  list.seurat <- lapply(X = list.seurat, FUN = function(x) {
+      x <- ScaleData(x, features = features, verbose = TRUE)
+      x <- RunPCA(x, features = features, verbose = TRUE)
+  })
+  
+  seurat.anchors <- FindIntegrationAnchors(object.list = list.seurat, anchor.features = features, reduction = "rpca")
+  
+  seuratSC <- IntegrateData(anchorset = seurat.anchors)
+  
+  saveRDS(seuratSC, file = file.path(outputPath,paste(prefix,subsetName,cellSet,"seuratSC","Raw","rds",sep=".")))
+}
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-4}
+seuratSC@meta.data %>%
+  group_by(timepoint) %>%
+  summarise(n.cells = length(timepoint),
+            WT = sum(Condition == "WT"),
+            Mut = sum(Condition == "Mut")) %>%
+  DT::datatable(
+  caption = "Integrated data summary"
+          , options = list(
+            searching = FALSE,
+            ordering = F,
+            info = F,
+            paging = F,
+            scrollX = T
+          ),
+  rownames = F
+)
+```
+
+
+Counts have been normalized and scaled for posterior analysis.
+
+```{r SCAV4.Lalaguna.Integrated.merge-5 }
+
+useAssay <- "integrated"
+
+```
+
+
+## Find Clusters and Reduce Dimensions
+
+```{r SCAV4.Lalaguna.Integrated.merge-6, include=toInclude}
+
+pList <- list()
+# varGenesN <- 2000
+varsToRegress <- c()
+useAssay <- "integrated"
+
+if (file.exists(file.path(outputPath,paste(prefix,subsetName,cellSet,"seuratSC","Final","rds",sep=".")))) {
+  
+  message(paste("Load seuratSC object from file:",file.path(outputPath,paste(prefix,subsetName,"seuratSC","Final","rds",sep="."))))
+  seuratSC <- readRDS(file = file.path(outputPath,paste(prefix,subsetName,cellSet,"seuratSC","Final","rds",sep=".")))
+  
+} else {
+  
+seuratSC <- seuratSC %>%
+  ScaleData(
+    assay = useAssay
+    , vars.to.regress = varsToRegress
+    , verbose = F
+  ) %>%
+  RunPCA(
+    assay = useAssay,
+    reduction.name = "PCA",
+    verbose = F)
+}
+top10 <- head(VariableFeatures(seuratSC),10)
+# plot1 <- VariableFeaturePlot(seuratSC)
+# pList[[length(pList)+1]] <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+
+pList[[length(pList)+1]] <- ElbowPlot(seuratSC,ndims = 50,reduction = "PCA")
+
+plog <- lapply(pList,function (p) {suppressMessages(suppressWarnings(print(p)))})
+
+pNames <-  knitr::fig_path(suffix = ".jpeg", options = knitr::opts_current$get(),seq(length(pList)))
+slide_id <- paste0("slide",sub(".+-(\\d+)$$","\\1",knitr::opts_current$get()$label))
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-7}
+
+slickR::slickR(
+    pNames,
+    height = 600, slideId = slide_id,
+    width = '100%') + settings(lazyLoad = 'ondemand',
+                               slidesToShow = 1,
+                               adaptiveHeight = T,
+                               dots = T
+                               )
+
+```
+
+## PCA Selection
+
+```{r SCAV4.Lalaguna.Integrated.merge-8}
+df <- Embeddings(seuratSC,reduction = "PCA")
+df <- cbind(df,seuratSC@meta.data)
+df <- df[sample(nrow(df),size = 10000),]
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-9}
+archive <- "sep2019.archive"
+SGenes <- readRDS(file = file.path(outputPath,paste("SGenes",archive,"rds",sep=".")))
+G2MGenes <- readRDS(file = file.path(outputPath,paste("G2MGenes",archive,"rds",sep=".")))
+
+ccGenesVars <- c(SGenes$uniq_name,G2MGenes$uniq_name)
+ccGenesVars <- ccGenesVars[ccGenesVars %in% VariableFeatures(seuratSC)]
+unloadings <- data.frame(
+  cc = colMeans(abs(seuratSC@reductions$PCA@feature.loadings[ccGenesVars,1:20]))/colMeans(abs(seuratSC@reductions$PCA@feature.loadings[,1:20]))
+  ) %>%
+  mutate(PC = rownames(.)) %>%
+  mutate(PC = factor(PC,levels = mixedsort(PC)))
+```
+
+### CC Module on PCAs
+
+```{r SCAV4.Lalaguna.Integrated.merge-10}
+pairs(df[,paste0("PC_",1:20)]
+      , row1attop = F
+      , gap = 0.25
+      , pch = 19
+      , cex = 0.5
+      , col = colorRamp2(
+        breaks = c(min(df$CC.Score1),mean(df$CC.Score1),max(df$CC.Score1)),
+        colors = c("blue","yellow","red"))(df$CC.Score1)
+      )
+ # RColorBrewer::brewer.pal(3,"Spectral")
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-11}
+unloadings %>%
+  ggplot(aes(x=PC,y=cc)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-12 }
+pcas <- c(1:5, 8:20)
+```
+
+According to the analysis on the PCAs, the `r pcas` PCAs have been used for all the posterior analysis.
+
+Clusters are identified using nearest neighbors algorithm at different resolutions.
+
+```{r SCAV4.Lalaguna.Integrated.merge-13 }
+
+ress <- c(0.1,0.2,0.5,0.75)
+
+if (file.exists(file.path(outputPath, paste(prefix,subsetName,cellSet,"seuratSC","Final","rds",sep=".")))) {
+  
+  message(paste("Load seuratSC object from file:",file.path(outputPath, paste(prefix,subsetName,cellSet,"seuratSC","Final","rds",sep="."))))
+  seuratSC <- readRDS(file = file.path(outputPath, paste(prefix,subsetName,cellSet,"seuratSC","Final","rds",sep=".")))
+  
+} else {
+  
+  seuratSC <- seuratSC %>%
+    FindNeighbors(
+      dims = pcas,
+      assay = useAssay,
+      reduction = "PCA") %>%
+    FindClusters(
+      resolution = ress,
+      verbose = F) %>%
+    RunUMAP(
+      dims = pcas,
+      assay = useAssay,
+      reduction = "PCA",
+      reduction.name = "UMAP",
+      return.model = TRUE
+    )
+  
+  seuratSC@meta.data <- seuratSC@meta.data %>%
+    mutate(across(contains("integrated_snn_res"),
+                  .fns = function (x) {
+                    return(paste0("C",x))
+                  })) %>%
+    mutate(across(contains("integrated_snn_res"),.fns = factor)) %>%
+    mutate(across(contains("integrated_snn_res"), .fns = function (x) {
+      return(factor(x,levels = mixedsort(levels(x))))
+    }))
+  
+}
+
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-14}
+
+seuratSC@meta.data[,grep("integrated_snn",colnames(seuratSC@meta.data))] %>% pivot_longer(cols = everything(),names_to = "res", values_to = "cluster") %>% group_by(cluster) %>% table
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-15}
+clustering <- "integrated_snn_res.0.5"
+```
+
+## UMAP representations
+
+```{r SCAV4.Lalaguna.Integrated.merge-16}
+df <- Embeddings(seuratSC,reduction = "UMAP")
+dnames <- colnames(df)
+df <- cbind(df,seuratSC@meta.data)
+```
+
+
+```{r SCAV4.Lalaguna.Integrated.merge-17, include=toInclude}
+pList <- list()
+ 
+cvars <- c("Sample",clustering,"scDblFinderUnbias.class","mmRNAFTLabelsSC", "timepoint", "ManualAnnotationPred")
+
+for (v in cvars) {
+  if (v == "ManualAnnotationPred"){
+    pList[[length(pList)+1]] <- df %>%
+      filter(!is.na(ManualAnnotationPred)) %>%
+    ggplot(aes_string(x=dnames[1], y=dnames[2])) +
+    geom_point(aes_string(color = v)) +
+    scale_color_manual(values = color.list) +
+    theme_classic() 
+  }
+  else{  
+    pList[[length(pList)+1]] <- df %>%
+    ggplot(aes_string(x=dnames[1], y=dnames[2])) +
+    geom_point(aes_string(color = v)) +
+    scale_color_manual(values = color.list) +
+    theme_classic()
+  }
+
+}
+
+nvars <- c("subsets_MT_percent","subsets_OX_percent","subsets_RB_percent","nCount_RNA","nFeature_RNA","CC.Score1")
+
+for (v in nvars) {
+  pList[[length(pList)+1]] <- df %>%
+  ggplot(aes_string(x=dnames[1], y=dnames[2])) +
+  geom_point(aes_string(color = v)) +
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(11,"Spectral")),
+                        name=v) +
+  theme_classic()
+}
+
+plog <- lapply(pList,function (p) {suppressMessages(suppressWarnings(print(p)))})
+
+pNames <-  knitr::fig_path(suffix = ".jpeg", options = knitr::opts_current$get(),seq(length(pList)))
+slide_id <- paste0("slide",sub(".+-(\\d+)$$","\\1",knitr::opts_current$get()$label))
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-18}
+xyLabels <- df %>%
+  group_by(!!as.name(clustering)) %>%
+  summarise(
+    x = median(UMAP_1),
+    y = median(UMAP_2)
+  )
+
+df %>%
+  ggplot(aes_string(x=dnames[1], y=dnames[2])) +
+  geom_point(aes_string(color = clustering)) +
+  geom_text(data = xyLabels,aes_string(x = "x", y = "y", label = clustering)) +
+  scale_color_manual(values = color.list) +
+  # facet_grid(c( "Condition","timepoint") ) +
+  theme_classic()
+```
+```{r SCAV4.Lalaguna.Integrated.merge-19}
+df %>%
+   filter(!is.na(ManualAnnotationPred)) %>%
+  ggplot(aes_string(x=dnames[1], y=dnames[2])) +
+  geom_point(aes_string(color = "ManualAnnotationPred")) +
+  # geom_text_repel(data = xyLabels,aes_string(x = "x", y = "y", label = clustering)) +
+  scale_color_manual(values = color.list) +
+  # facet_grid(c( "Condition","timepoint") ) +
+  theme_classic()
+```
+
+
+```{r SCAV4.Lalaguna.Integrated.merge-20}
+
+slickR::slickR(
+    pNames,
+    height = 600, slideId = slide_id,
+    width = '100%') + settings(lazyLoad = 'ondemand',
+                               slidesToShow = 1,
+                               adaptiveHeight = T,
+                               dots = T
+                               )
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-21}
+xyLabels <- df %>%
+  group_by(!!as.name(clustering)) %>%
+  summarise(
+    x = median(UMAP_1),
+    y = median(UMAP_2)
+  )
+
+df %>%
+  mutate(timepoint = factor(timepoint, ordered = T, levels= c("time.5W", "time.10W", "time.16W"))) %>%
+  ggplot(aes_string(x=dnames[1], y=dnames[2])) +
+  geom_point(aes_string(color = clustering)) +
+  # geom_text_repel(data = xyLabels,aes_string(x = "x", y = "y", label = clustering)) +
+  scale_color_manual(values = color.list) +
+  facet_grid(c( "Condition","timepoint") ) +
+  theme_classic()
+```
+
+## Cluster quantification
+
+The number of cells per cluster, condition and time point, (raw and normalized by sample) can be found at [`r file.path(paste(subsetName,cellSet, "cluster.quantification","xlsx",sep="."))`](`r file.path(outputPath,paste(subsetName,cellSet, "cluster.quantification","xlsx",sep="."))`) 
+
+```{r ClusterQuanti}
+cells.per.sample <- df %>% group_by(Sample) %>%
+  summarise(n = n())
+
+sample.info <- df %>% group_by(Sample) %>%
+  summarise(n.cells = n(),
+            Condition = Condition[1],
+            timepoint = timepoint[1])
+
+
+clusters.by.sample <- df %>% group_by(Sample, integrated_snn_res.0.5) %>%
+  summarise(n.clus = n()) %>%
+  full_join(sample.info, by = "Sample") %>%
+  mutate(sample.per = n.clus/n.cells *100) %>%
+  mutate(timepoint = factor(timepoint, ordered = T, levels= c("time.5W", "time.10W", "time.16W")),
+           Condition = factor(Condition, ordered = T, levels= c("WT", "Mut")))
+
+clusters.by.sample %>% rename(
+  n.cells.sample = "n.cells",
+  n.cells.cluster = "n.clus") %>%
+  write.xlsx(file = file.path(outputPath,paste(subsetName,cellSet, "cluster.quantification","xlsx",sep=".")), firstRow = T, firstCol = T)
+
+clusters.by.sample %>% ggplot(aes(x = Condition,
+                                  y = sample.per,
+                                  fill = integrated_snn_res.0.5,
+                                  group = timepoint)) +
+  geom_col(position = position_dodge()) +
+  scale_fill_manual(values = color.list) +
+  facet_wrap("integrated_snn_res.0.5", scales = "free_y") +
+  ylab("Cluster percentage per sample") +
+  xlab("Condition + timepoint(5, 10, 16 W)")
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-22}
+clusters.by.sample %>% ggplot(aes(x = timepoint, 
+                                  y = sample.per, 
+                                  color = integrated_snn_res.0.5,
+                                  group = integrated_snn_res.0.5)) +
+  geom_point() +
+  geom_line() +
+  scale_color_manual(values = color.list) +
+  facet_wrap("Condition") +
+  ylab("Cluster percentage per sample")
+  # xlab("Condition + timepoint(5, 10, 16 W)")
+```
+```{r SCAV4.Lalaguna.Integrated.merge-23}
+clusters.by.sample %>% 
+  mutate(timepoint = str_replace(timepoint, "time.", ""),
+         timepoint = factor(timepoint, ordered = T, levels= c("5W", "10W", "16W"))) %>%
+  ggplot(aes(x = timepoint, 
+                                  y = sample.per, 
+                                  color = integrated_snn_res.0.5,
+                                  group = Condition)) +
+  geom_point() +
+  geom_line(aes(lty = Condition)) +
+  scale_color_manual(values = color.list, guide = "none") +
+  facet_wrap("integrated_snn_res.0.5") +
+  ylab("Cluster percentage per sample") 
+  
+  
+  # xlab("Condition + timepoint(5, 10, 16 W)")
+```
+
+The same plot but with independent y axis scales:
+
+```{r SCAV4.Lalaguna.Integrated.merge-24}
+clusters.by.sample %>% 
+  mutate(timepoint = str_replace(timepoint, "time.", ""),
+         timepoint = factor(timepoint, ordered = T, levels= c("5W", "10W", "16W"))) %>%
+  ggplot(aes(x = timepoint, 
+                                  y = sample.per, 
+                                  color = integrated_snn_res.0.5,
+                                  group = Condition)) +
+  geom_point() +
+  geom_line(aes(lty = Condition)) +
+  scale_color_manual(values = color.list, guide = "none") +
+  facet_wrap("integrated_snn_res.0.5", scales = "free_y") +
+  ylab("Cluster percentage per sample") 
+```
+
+
+```{r SCAV4.Lalaguna.Integrated.merge-25}
+# df %>%
+#   mutate(timepoint = factor(timepoint, ordered = T, levels= c("time.5W", "time.10W", "time.16W"))) %>%
+#   ggplot(aes_string(x=dnames[1], y=dnames[2])) +
+#   geom_point(aes_string(color = "ManualAnnotationPred")) +
+#   # geom_text_repel(data = xyLabels,aes_string(x = "x", y = "y", label = clustering)) +
+#   scale_color_manual(values = color.list) +
+#   facet_wrap("timepoint") +
+#   theme_classic()
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-26}
+# df %>%
+#   mutate(timepoint = factor(timepoint, ordered = T, levels= c("time.5W", "time.10W", "time.16W"))) %>%
+#   
+#   ggplot(aes_string(x="timepoint",fill=clustering)) +
+#   geom_bar(position = "fill") +
+#   # geom_text_repel(data = xyLabels,aes_string(x = "x", y = "y", label = clustering)) +
+#   scale_fill_manual(values = color.list) +
+#   # facet_wrap("timepoint") +
+#   theme_classic()
+```
+
+
+## Redefinition of resolution
+
+```{r ResoRedefinition}
+df <- Embeddings(seuratSC, reduction = "UMAP")
+dnames <- colnames(df)
+df <- cbind(df, seuratSC@meta.data)
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-27}
+df %>%
+  pivot_longer(cols = contains("integrated_snn_res"),names_to = "Resolution", values_to = "Cluster") %>%
+  ggplot(aes_string(x=dnames[1], y=dnames[2])) +
+  geom_point(aes_string(color = "Cluster")) +
+  scale_color_manual(values = color.list) +
+  facet_wrap("Resolution") +
+  theme_classic()
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-28}
+
+library(clustree)
+myClusters <- seuratSC@meta.data %>% dplyr::select(starts_with("integrated_snn"))
+
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-29, fig.asp=1}
+
+clustree(myClusters, prefix = "integrated_snn_res.", node_colour = "sc3_stability") +
+  scale_color_continuous(low = "purple", high = "yellow")
+
+```
+
+
+```{r SCAV4.Lalaguna.Integrated.merge-30 }
+
+res <- 0.5
+
+if (file.exists(file.path(outputPath,paste(prefix,subsetName,cellSet,"seuratSC","Final","rds",sep=".")))) {
+  
+  message(paste("Load seuratSC object from file:",file.path(outputPath,paste(prefix,subsetName,"seuratSC","Final","rds",sep="."))))
+  seuratSC <- readRDS(file = file.path(outputPath,paste(prefix,subsetName,cellSet,"seuratSC","Final","rds",sep=".")))
+  
+} else {
+  
+  seuratSC@meta.data$res.Final <- seuratSC@meta.data[,paste0(useAssay,"_snn_res.",res)]
+  Idents(seuratSC) <- "res.Final"
+  saveRDS(seuratSC,file = file.path(outputPath,paste(prefix,subsetName,cellSet,"seuratSC","Final","rds",sep=".")))
+
+}
+
+```
+
+<!-- ## Importing labels from 16W via Seurat::TransferData -->
+```{r SCAV4.Lalaguna.Integrated.merge-31}
+# if (!"ManualAnnotationPred" %in% colnames(seuratSC@meta.data)) {
+#   annot.seurat <- readRDS("/home/crelanor/NetVolumes/BioInfoUnit/LABS/U_Bioinformatica/UNIT_MEMBERS/crelanor/Projects_SC/Laura_Lalaguna/Muestras_16W/SC.Analysis.V2/SC.Analysis.output/SC.Analysis.16W.All.Heart.seuratSC.Final.rds")
+#   
+#   anchors <- FindTransferAnchors(reference = annot.seurat, 
+#                                  query = seuratSC,
+#                                  dims = 1:30, 
+#                                  reference.reduction = "PCA")
+#   predictions <- TransferData(anchorset = anchors, 
+#                               refdata = annot.seurat$ManualAnnotationPred,
+#                               dims = 1:30)
+#   saveRDS(predictions, file.path(outputPath,paste(prefix,"transferData.predictions","rds",sep=".")))
+#   
+#   predictions$predicted.id.clean <- predictions$predicted.id
+#   predictions$predicted.id.clean[predictions$prediction.score.max < 0.8] <- NA
+#   
+#   all(rownames(predictions) == colnames(seuratSC))
+#   
+#   seuratSC$ManualAnnotationPred <- predictions$predicted.id.clean
+#   
+#   saveRDS(seuratSC,file = file.path(outputPath,paste(prefix,subsetName,cellSet,"seuratSC","Final","rds",sep=".")))
+# }
+```
+
+
+```{r SCAV4.Lalaguna.Integrated.merge-32, include=toInclude}
+pList <- list()
+
+for (res in colnames(seuratSC@meta.data) %>% grep("_res", ., value = T)){
+  pList[[length(pList)+1]] <- Heatmap(scale(table(seuratSC$ManualAnnotationPred, seuratSC@meta.data[,res])),
+          cluster_rows = F,
+          cluster_columns = T,
+          name = "Scaled cells per cluster",
+          column_title = res)
+  # print(hm)
+}
+
+plog <- lapply(pList,function (p) {suppressMessages(suppressWarnings(print(p)))})
+
+pNames <-  knitr::fig_path(suffix = ".jpeg", options = knitr::opts_current$get(),seq(length(pList)))
+slide_id <- paste0("slide",sub(".+-(\\d+)$$","\\1",knitr::opts_current$get()$label))
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-33}
+
+slickR::slickR(
+    pNames,
+    height = 600, slideId = slide_id,
+    width = '100%') + settings(lazyLoad = 'ondemand',
+                               slidesToShow = 1,
+                               adaptiveHeight = T,
+                               dots = T
+                               )
+
+```
+
+We will keep res = 0.5, which best matches the old labels.
+
+```{r SCAV4.Lalaguna.Integrated.merge-34}
+# df <- Embeddings(seuratSC,reduction = "UMAP")
+# dnames <- colnames(df)
+# df <- cbind(df,seuratSC@meta.data)
+# 
+# cvars <- c("res.Final")
+# 
+# pList2 <- list()
+# 
+# for (v in cvars) {
+#   xyLabels <- df %>%
+#   group_by(!!as.name(v)) %>%
+#   summarise(
+#     x = median(UMAP_1),
+#     y = median(UMAP_2)
+#   )
+#   
+#      pList2[[length(pList2)+1]]<- df %>%
+#     ggplot(aes_string(x=dnames[1], y=dnames[2])) +
+#     geom_point(aes_string(color = v)) +
+#     scale_color_manual(values = color.list) +
+#     theme_classic() +
+#     geom_text(data = xyLabels,aes_string(x = "x", y = "y", label = v)) 
+# 
+# }
+# xyLabels <- df %>%
+#   group_by(ManualAnnotationPred) %>%
+#   summarise(
+#     x = median(UMAP_1),
+#     y = median(UMAP_2)
+#   )
+# pList2[[length(pList2)+1]]<- df %>%
+#   filter(!is.na(ManualAnnotationPred)) %>%
+#     ggplot(aes_string(x=dnames[1], y=dnames[2])) +
+#     geom_point(aes_string(color = "ManualAnnotationPred")) +
+#     scale_color_manual(values = color.list) +
+#     theme_classic() +
+#     geom_text_repel(data = xyLabels,aes_string(x = "x", y = "y", label = "ManualAnnotationPred"), min.segment.length = 0) 
+# 
+# # lapply(pList2,function (p) {suppressMessages(suppressWarnings(print(p)))})
+# pList2
+```
+
+
+## hTMEM43 per cluster
+```{r SCAV4.Lalaguna.Integrated.merge-35}
+seuratSC@meta.data %>%
+  ggplot(aes(x = log2_norm_Tdt_counts,
+             y = res.Final)) +
+  geom_boxplot() +
+  ggtitle("hTMEM43 expression per cluster")
+```
+```{r SCAV4.Lalaguna.Integrated.merge-36}
+if (file.exists(file.path(outputPath,paste(prefix,clustering,"hTMEM43.stats.rds",sep=".")))){
+  tmem.data <- readRDS(file = file.path(outputPath,paste(prefix,clustering,"hTMEM43.stats.rds",sep=".")))
+}else{
+  tmem.data <- seuratSC@meta.data %>%
+    dplyr::select(log2_norm_Tdt_counts, res.Final)
+  
+  tmem.data <- tmem.data %>%
+    group_by(res.Final) %>%
+    summarise(n.cells = length(log2_norm_Tdt_counts),
+              n.detected = sum(log2_norm_Tdt_counts > 0),
+              per.detected = round(sum(log2_norm_Tdt_counts > 0) / length(log2_norm_Tdt_counts) * 100, 3),
+              mean.exp = mean(log2_norm_Tdt_counts),
+              median.exp = median(log2_norm_Tdt_counts),
+              sd.exp = sd(log2_norm_Tdt_counts)) %>%
+    rename(Cluster.075 = "res.Final")
+  
+  
+  saveRDS(tmem.data,  file = file.path(outputPath,paste(prefix,clustering,"hTMEM43.stats.rds",sep=".")))
+  write.xlsx(tmem.data,
+             file = file.path(outputPath,paste(prefix,clustering,"hTMEM43.stats.xlsx",sep=".")), 
+               firstRow = T, firstCol = T, overwrite = T
+    )
+}
+
+tmem.data %>% mutate(mean.exp = round(mean.exp, 3),
+                     median.exp = round(median.exp, 3),
+                     sd.exp = round(sd.exp, 3)) %>%
+DT::datatable(data = .,
+              caption = "hTMEM43 expression by cluster",
+              options = list(searching = FALSE,
+                             ordering = F,
+                             info = F,
+                             paging = F,
+                             scrollX = T),
+              rownames = F) %>%
+  formatStyle(columns = c("per.detected"),
+  background = styleColorBar(c(0, 100), 'lightblue'),
+  backgroundSize = '98% 88%',
+  backgroundRepeat = 'no-repeat',
+  backgroundPosition = 'center') %>%
+  formatStyle(columns = c("mean.exp"),
+  background = styleColorBar(c(0, max(tmem.data$mean.exp)), 'tomato'),
+  backgroundSize = '98% 88%',
+  backgroundRepeat = 'no-repeat',
+  backgroundPosition = 'center')
+```
+This data can be found at [`r file.path(paste(prefix,clustering,"hTMEM43.stats.xlsx",sep="."))`](`r file.path(paste(prefix,clustering,"hTMEM43.stats.xlsx",sep="."))`)
+
+## Marker Genes for each cluster
+
+```{r SCAV4.Lalaguna.Integrated.merge-37}
+
+cellSet <- "All"
+subsetName <- "RPCA.Integrated"
+contrastType <- "DEvsAll"
+clustering <- "res.Final"
+latvars <- c()
+Idents(seuratSC) <- clustering 
+testUse <- "MAST"
+
+minPct <- 30
+pval <- 0.01
+
+```
+
+Only genes detected over `r minPct`% in the cells of any of the groups compared are analyzed. An Adjusted P-value of `r pval` is used as significance threshold. This setting can be tuned later. Either, genes up- and down-regulated are considered.
+
+```{r SCAV4.Lalaguna.Integrated.merge-38 }
+
+mExprs <- expm1(Seurat::Assays(seuratSC,slot = useAssay)@data)
+
+aExprs <- AverageExpression(seuratSC,
+                            assays = useAssay,
+                            group.by = clustering,
+                            verbose = F)[[useAssay]] %>%
+  as.data.frame() %>%
+  mutate(gene=rownames(.))
+
+cellsPerCluster <- seuratSC@meta.data %>%
+  dplyr::select(cellId,res.Final) %>%
+  group_split(res.Final) %>%
+  map(~ .$cellId)
+
+names(cellsPerCluster) <- levels(factor(seuratSC$res.Final))
+
+if (file.exists(file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType,paste(contrastType,subsetName,cellSet,clustering,minPct,testUse,"rds",sep=".")))) {
+  
+  message(paste("reading Cluster Markers from",file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType,paste(contrastType,subsetName,cellSet,clustering,minPct,testUse,"rds",sep="."))))
+  Cluster.markers <- readRDS(file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType,paste(contrastType,subsetName,cellSet,clustering,minPct,testUse,"rds",sep=".")))
+  
+} else {
+  
+  message(paste("Find Markers","contrastsBtwnClusters",subsetName,cellSet,contrastType,clustering))
+  
+  Cluster.markers <- seuratSC %>%
+    FindAllMarkers(
+      assay = useAssay
+      , slot = "data"
+      , min.pct = minPct/100
+      , return.thresh = pval
+      , test.use = testUse
+      , verbose = T
+      , only.pos = T
+      , latent.vars = latvars
+    )
+  
+# FindAllMarkers(
+#       seuratSC,
+#       assay = useAssay
+#       , slot = "data"
+#       , min.pct = minPct/100
+#       , return.thresh = pval
+#       , test.use = testUse
+#       , verbose = T
+#       , only.pos = T
+#       , latent.vars = latvars
+#     ) %>% 
+  # saveRDS(file.path(outputPath, "markers.ok.rds"))
+  
+  # Cluster.markers <- readRDS(file.path(outputPath, "markers.ok.rds"))
+  
+  cAvr <- function (x,counts) {
+    return(Matrix::rowMeans(counts[,colnames(counts) %in% x]))
+  }
+  
+  rAvr <- function (x,counts) {
+    return(Matrix::rowMeans(counts[,!colnames(counts) %in% x]))
+  }
+  
+  
+  cm <- lapply( # cluster
+    cellsPerCluster,cAvr,mExprs
+  )
+  rm <- lapply( # reast
+    cellsPerCluster,rAvr,mExprs
+  )
+  nbyCluster <- unlist(lapply(cellsPerCluster,length))
+  Cluster.markers <- Cluster.markers %>%
+    as_tibble() %>%
+    rowwise() %>%
+    mutate(n_cluster = nbyCluster[[cluster]],
+           n_rest = sum(nbyCluster) - n_cluster,
+           exp_cluster = cm[[cluster]][gene],
+           exp_rest = rm[[cluster]][gene]) %>%
+    ungroup() %>%
+    left_join(genesMetadata %>%
+                dplyr::select(uniq_name,ensembl_gene_id),
+              by = c("gene"="uniq_name")) %>%
+    rename(
+      pct_cluster = "pct.1",
+      pct_rest = "pct.2"
+    ) %>%
+    dplyr::select(all_of(c("cluster","gene","avg_log2FC","p_val_adj","exp_cluster","exp_rest","pct_cluster","pct_rest","n_cluster","n_rest","ensembl_gene_id")))
+  
+  dir.create(file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType),recursive = T)
+  
+  dm <- Cluster.markers %>%
+    mutate(GeneCardLink = paste0(geneCardUrl, gene),
+           ensemblLink = paste0(ensemblUrl, ensembl_gene_id)
+    ) %>%
+    left_join(aExprs,by = c("gene"))
+  
+  class(dm$GeneCardLink) <- "hyperlink"
+  class(dm$ensemblLink) <- "hyperlink"
+  
+  write.xlsx(dm,
+             sheetName = "ContrastVsAll",
+             file = file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType,paste(contrastType,subsetName,cellSet,clustering,minPct,testUse,"xlsx",sep=".")), 
+             firstRow = T, firstCol = T, overwrite = T
+  )
+  
+  Cluster.markers %>%
+    mutate(GeneCardLink = paste0("<a href='"
+                                 ,paste0(geneCardUrl,gene)
+                                 ,"' target='_blank'>"
+                                 , gene
+                                 ,"</a>"),
+           ensemblLink <- paste0("<a href='"
+                                 ,paste0(ensemblUrl,ensembl_gene_id)
+                                 ,"' target='_blank'>"
+                                 ,ensembl_gene_id
+                                 ,"</a>")
+    ) %>%
+    write_tsv(file = file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType,paste(contrastType,subsetName,cellSet,clustering,minPct,testUse,"tsv",sep=".")),col_names = T)
+  
+  saveRDS(Cluster.markers,file = file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType,paste(contrastType,subsetName,cellSet,clustering,minPct,testUse,"rds",sep=".")))
+  
+}
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-39 }
+
+t <- table(Cluster.markers[Cluster.markers$p_val_adj < pval,"cluster"])
+
+datatable(t(as.matrix(t))
+          , caption = "Cluster sig markers"
+          , options = list(
+            searching = FALSE,
+            ordering = F,
+            info = F,
+            paging = F,
+            scrollX = F
+          )
+          )
+
+```
+
+Get an excel file with all the results from this analysis here: [`r file.path("contrastsBtwnClusters",subsetName,contrastType,paste(contrastType,subsetName,cellSet,clustering,minPct,testUse,"xlsx",sep="."))`](`r file.path( "contrastsBtwnClusters",subsetName,contrastType,paste(contrastType,subsetName,cellSet,clustering,minPct,testUse, "xlsx",sep= "."))`)
+
+### Top Markers Heatmap
+
+```{r SCAV4.Lalaguna.Integrated.merge-40}
+ntop <- 30
+```
+
+The following heatmap shows the `r ntop` top markers for each cluster.
+
+In the heatmap the cells are ordered according to cluster, tissue, condition and sample.
+
+```{r SCAV4.Lalaguna.Integrated.merge-41, fig.height=14, fig.width=9}
+
+Cluster.markers.Top <- Cluster.markers %>% group_by(cluster) %>% top_n(ntop, avg_log2FC)
+
+featuresToPlot <- Cluster.markers.Top$gene
+
+cellNames <- names(Idents(seuratSC))
+
+colAnnots <- c(clustering
+               ,"Sample"
+)
+ha <- FetchData(seuratSC,
+                vars = colAnnots
+                ,cells = cellNames)
+
+ha <- ha %>% dplyr::select(all_of(colAnnots))
+
+colnames(ha) <- c("Clusters",colAnnots[-1])
+
+ha <- ha %>% mutate(cellName=rownames(ha)) %>% arrange(across(c("Clusters",colAnnots[-1])))
+
+ha <- ha %>% group_by(Clusters) %>% sample_frac(0.5) %>% ungroup()
+
+df <- t(scale(t(Seurat::Assays(seuratSC,slot=useAssay)@data[unique(sort(featuresToPlot)),ha$cellName])))
+
+ha <- as.data.frame(ha)
+rownames(ha) <- colnames(df)
+
+ha$cellName <- NULL
+
+ha <- ha %>% mutate_at(c("Clusters",colAnnots[-1]),factor)
+
+colAnnotColors <- list()
+for (a in c("Clusters",colAnnots[-1])) {
+  colAnnotColors[[a]] <- color.list[seq(length(levels(ha[,a])))]
+  names(colAnnotColors[[a]]) <- levels(ha[,a])
+}
+
+lgdList <- lapply(c("Scaled\nLog(NormCounts)",c("Clusters",colAnnots[-1])),
+                  function (x) {
+                    if (x == "Scaled\nLog(NormCounts)") {
+                      lgd = Legend(at = c(-2,0,2),col_fun = colorRamp2(c(-2, 0, 2), c("purple","black","yellow")), title = x)  
+                    } else {
+                      lgd = Legend(at = levels(ha[,x])[unique(sort(ha[,x]))],
+                                   legend_gp = gpar(fill = colAnnotColors[[x]][unique(sort(ha[,x]))]),title = "Cluster")
+                    }
+                    return(lgd)
+                  }
+)
+
+ht <- Heatmap(df,
+        col = colorRamp2(c(-2, 0, 2), c("purple","black","yellow")),
+        cluster_rows = T,
+        cluster_columns = F,
+        column_split = ha$Clusters,
+        cluster_column_slices = F,
+        top_annotation = HeatmapAnnotation(df=ha,show_legend = F,
+                                           col = colAnnotColors),
+        show_column_names = F,
+        row_names_gp = gpar(fontsize = 4),
+        show_heatmap_legend = F
+        )
+draw(ht,annotation_legend_list = lgdList,use_raster = F)
+
+```
+
+### Markers expression
+
+The following plots shows the expression of the top 8 markers per cluster.
+
+```{r SCAV4.Lalaguna.Integrated.merge-42 }
+
+Cluster.markers.Plot <- Cluster.markers %>% group_by(cluster) %>% top_n(8, avg_log2FC)
+
+mks <- Cluster.markers.Plot$gene
+
+plotNumbers <- length(seq(from = 1, to = ceiling(length(mks)/8)*8,by = 8))
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-43, fig.height=9, fig.width=14, include=toInclude}
+
+df <- as.data.frame(Embeddings(seuratSC,reduction = "UMAP"))
+dnames <- colnames(df)
+df$cluster <- Idents(seuratSC)
+
+dcluster <- data.frame(cluster=factor(levels(df$cluster),levels = mixedsort(levels(df$cluster))))
+dcluster$x <- aggregate(df[,dnames[1]],by=list(df$cluster),FUN=median)$x
+dcluster$y <- aggregate(df[,dnames[2]],by=list(df$cluster),FUN=median)$x
+
+pList <- list()
+
+cPlot <- ggplot(df,aes_string(x=dnames[1], y=dnames[2])) +
+  geom_point(aes(colour=cluster,fill=cluster,size=0.3)) +
+  geom_text(data=dcluster,aes(x=x, y=y,label=cluster, size=0.5)) +
+  # geom_label_repel(data=dcluster,aes(x=x, y=y,label=cluster,size=1,fill=cluster),box.padding = 1) +
+  scale_color_manual(values = c(color.list,color.list)) +
+  scale_fill_manual(values = c(color.list,color.list)) +
+  theme_void() +
+  theme(legend.position="none")
+
+for (cluster in levels(Cluster.markers.Plot$cluster)) {
+  message(cluster)
+  plotList <- list()
+  plotList$Clusters <- cPlot
+  for (g in Cluster.markers.Plot$gene[Cluster.markers.Plot$cluster == cluster]) {
+    gc <- data.frame(g = Seurat::Assays(seuratSC,slot=useAssay)@data[g,])
+    b <- quantile(scale(gc$g),probs=(c(0.01,0.99)))
+    # gc[gc$g>b[2],"g"] <- b[2]
+    # gc[gc$g<b[1],"g"] <- b[1]
+    plotList[[g]] <- ggplot(cbind(df,gc),aes_string(x=dnames[1],y=dnames[2])) +
+      geom_point(aes_string(color="g"),size=0.3) +
+      scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(11,"Spectral")),name="Log(NormCounts)") +
+      # scale_color_gradientn(colors = colorRampPalette(colors = c("blue","yellow","red"))(3)) +
+      ggtitle(paste(toupper(sub("^([-\\w]+)_.+$","\\1",g,perl = T)))) +
+      theme_void()
+      # theme(legend.position="none")
+  }
+  pList[[length(pList)+1]] <- marrangeGrob(plotList, nrow=3, ncol=3, top=paste("Top 8 markers for cluster",cluster))
+
+}
+pList
+
+pNames <- knitr::fig_path(suffix = ".jpeg", options = knitr::opts_current$get(),seq(length(pList)))
+slide_id <- paste0("slide",sub(".+-(\\d+)$$","\\1",knitr::opts_current$get()$label))
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-44}
+
+slickR::slickR(
+    pNames,
+    height = 600,slideId = slide_id,
+    width = '100%') + settings(lazyLoad = 'ondemand',
+                               slidesToShow = 1,
+                               adaptiveHeight = T,
+                               # centerMode = F,
+                               dots = T
+                               )
+
+```
+
+### DotPlot of Marker Genes For Each Cluster
+
+```{r SCAV4.Lalaguna.Integrated.merge-45 }
+
+ntop <- 10
+pvalcut <- 0.01
+
+selectedGenes <- Cluster.markers %>% filter(p_val_adj < pvalcut) %>% group_by(cluster) %>% top_n(ntop, avg_log2FC)
+
+selectedGenes <- selectedGenes %>% arrange(cluster,-avg_log2FC,gene)
+
+orderGenes <- selectedGenes[!duplicated(selectedGenes$gene),"gene"] %>% as.data.frame
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-46, echo=F, include=F}
+
+p <- DotPlot(
+  seuratSC,
+  assay = useAssay,
+  group.by = "res.Final",
+  features = rev(orderGenes$gene),
+  # do.return = T,
+  # plot.legend = T,
+  )
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-47, }
+
+print(p +
+  ylab("Cluster") +
+  xlab("Gene") +
+  scale_size_area(max_size = 2) +
+  scale_color_gradientn(colours = rev(RColorBrewer::brewer.pal(11,"Spectral")), na.value = NA) +
+  scale_fill_gradientn(colours = rev(RColorBrewer::brewer.pal(11,"Spectral")), na.value = NA) +
+  theme(axis.text.x=element_text(angle = 90, size = 5),
+        axis.text.y=element_text(size = 8),
+        legend.title = element_text(size = 8)
+        )
+  )
+
+```
+
+### DotPlot splited by condition
+
+```{r SCAV4.Lalaguna.Integrated.merge-48, fig.asp=0.7, fig.width=12}
+seuratSC <- seuratSC
+
+seuratSC@meta.data <- seuratSC@meta.data %>%
+  mutate(ClusterSample = factor(paste(res.Final,Sample,sep = "."))) %>%
+  mutate(ClusterSample = factor(ClusterSample,levels = mixedsort(levels(ClusterSample))))
+
+p <- DotPlot(seuratSC,
+        assay = useAssay,
+        group.by = "ClusterSample",
+        features = rev(orderGenes$gene),
+)
+
+print(p +
+  ylab("Cluster") +
+  xlab("Gene") +
+  scale_size_area(max_size = 3) +
+  scale_color_gradientn(colours = rev(RColorBrewer::brewer.pal(11,"Spectral"))) +
+  # theme_bw() +
+  theme(axis.text.x=element_text(angle = 90, size = 8),
+        axis.text.y=element_text(size = 8),
+        legend.title = element_text(size = 8)
+        )
+  )
+
+```
+
+### Functional Analysis
+
+```{r SCAV4.Lalaguna.Integrated.merge-49}
+pval <- 0.05
+ntop <- 600
+
+dbs <- tibble(
+  dbs=c(
+    "TRRUST_Transcription_Factors_2019"
+    ,"GO_Biological_Process_2018"
+    ,"GO_Molecular_Function_2018"
+    ,"GO_Cellular_Component_2018"
+    ,"KEGG_2019_Mouse"
+    # ,"KEGG_2019_Human"
+    ,"WikiPathways_2019_Mouse"
+    # ,"WikiPathways_2019_Human"
+    # ,"Enrichr_Users_Contributed_Lists_2020"
+    # ,"ClinVar_2019"
+    # ,"DisGeNET"
+  ),
+  abrv=c(
+    "TRR"
+    ,"BP"
+    ,"MF"
+    ,"CC"
+    ,"KPM"
+    # ,"KPH"
+    ,"WPM"
+    # ,"WPH"
+    # ,"EUC"
+    # ,"CV"
+    # ,"DGN"
+  )
+)
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-50}
+
+if (file.exists(file.path(outputPath,"contrastsBtwnClusters",
+                           subsetName,contrastType,"enrichR",
+                           paste("EnrichR",subsetName,cellSet,clustering,
+                                 "AllClusters","rds",sep=".")))) {
+  
+  message("Load Enrichment from:",
+          file.path(outputPath,"contrastsBtwnClusters",
+                           subsetName,contrastType,"enrichR",
+                           paste("EnrichR",subsetName,cellSet,clustering,
+                                 "AllClusters","rds",sep=".")))
+  enrichDF <- readRDS(
+    file.path(outputPath,"contrastsBtwnClusters",
+                           subsetName,contrastType,"enrichR",
+                           paste("EnrichR",subsetName,cellSet,clustering,
+                                 "AllClusters","rds",sep=".")))
+  
+} else {
+  
+  dir.create(file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType,"enrichR"))
+  
+  setEnrichrSite("Enrichr")
+  
+  websiteLive <- TRUE
+  
+  dbsR <- listEnrichrDbs()
+  
+  if (is.null(dbsR)) websiteLive <- FALSE
+  
+  if (websiteLive) head(dbsR)
+  
+  # Perform Enrichment by Cluster filtering to top sig genes
+  enrichList <- Cluster.markers %>%
+    group_split(cluster,.keep = T) %>%
+    map(~ .x %>%
+          filter(p_val_adj < pval) %>%
+          top_n(ntop,abs(avg_log2FC))
+    ) %>%
+    map(~ .x$gene %>%
+          enrichr(.,dbs$dbs)
+    ) %>%
+    setNames(levels(Cluster.markers$cluster))
+  
+  # Unlist results to a table
+  enrichDF <- enrichList %>%
+    map(~ .x %>%
+          discard(~ is.null(.x)) %>%
+          discard(~ dim(.x)[1] == 0) %>%
+          bind_rows(.,.id = "Category")
+    ) %>%
+    bind_rows(.id = "Cluster")
+  
+  # Create IDTerm column when present (i.e. GO Terms and WikiPathways)
+  enrichDF <- enrichDF %>%
+    as_tibble() %>%
+    mutate(Term = sub("(WP\\d+)$","|\\1",Term,perl = T)) %>%
+    mutate(Term = sub("\\)$","",Term)) %>%
+    mutate(Term = sub("\\((GO\\:)","|\\1",Term,perl = T)) %>%
+    separate(Term,into = c("Term","TermID"),sep = "\\|",fill = "right")
+  
+  # Add TermID when missing
+  enrichDF <- enrichDF %>%
+    left_join(dbs,by = c("Category"="dbs")) %>%
+    group_by(Category) %>%
+    mutate(ID = as.numeric(factor(Term))) %>%
+    ungroup() %>%
+    mutate(TermID = ifelse(is.na(TermID),
+                           paste0(abrv,ID),
+                           TermID)
+    ) %>%
+    dplyr::select(-ID)
+  
+  # Factorize Cluster column and remove some columns
+  enrichDF <- enrichDF %>%
+    mutate(Cluster = factor(Cluster)) %>%
+    mutate(Cluster = factor(Cluster,levels = mixedsort(levels(Cluster)))) %>%
+    separate(Overlap, into = c("Count","Pop.Hits")) %>%
+    dplyr::select(-contains("Old"))
+  
+  # Save XLSX
+  write.xlsx(enrichDF %>%
+               group_split(Cluster) %>%
+               setNames(levels(enrichDF$Cluster)) %>%
+               as.list(),
+             file = file.path(outputPath,"contrastsBtwnClusters",
+                              subsetName,contrastType,"enrichR",
+                              paste("EnrichR",subsetName,cellSet,clustering,
+                                    "AllClusters","xlsx",sep=".")),
+             firstRow = T, firstCol = T,overwrite = T
+  )
+  
+  # Save Object Table
+  saveRDS(enrichDF,
+          file = file.path(outputPath,"contrastsBtwnClusters",
+                           subsetName,contrastType,"enrichR",
+                           paste("EnrichR",subsetName,cellSet,clustering,
+                                 "AllClusters","rds",sep="."))
+  )
+  
+}
+
+
+```
+
+Functional analysis table can be explored in this excel file: [`r file.path("contrastsBtwnClusters",subsetName,contrastType,"enrichR",paste("EnrichR",subsetName,cellSet,clustering,"AllClusters","xlsx",sep="."))`](`r file.path( "contrastsBtwnClusters",subsetName,contrastType, "enrichR",paste("EnrichR",subsetName,cellSet,clustering,"AllClusters","xlsx",sep="."))`)
+
+```{r SCAV4.Lalaguna.Integrated.merge-51}
+
+enrichDF2 <- enrichDF %>%
+  filter(Count > 1) %>%
+  separate_rows(Genes,sep = ";") %>%
+  left_join(Cluster.markers %>%
+              mutate(gene=toupper(gene)) %>%
+              dplyr::select(cluster,gene,avg_log2FC),
+            by = c("Cluster"="cluster","Genes"="gene")) %>%
+  group_by(Category,Term,Cluster) %>%
+  summarise(
+    across(.cols = -starts_with(c("Genes","avg_log2FC")),
+                                 .fns = unique),
+    zscore=mean(avg_log2FC,na.rm = T)/sd(avg_log2FC,na.rm = T),
+    Genes=toString(Genes)
+    ) %>%
+  ungroup()
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-52, include=toInclude}
+
+pval <- 0.05
+nc <- 3
+topf <- 20
+
+enrichDF2 <- enrichDF2 %>%
+  mutate(Category = factor(Category)) %>%
+  filter(Adjusted.P.value < pval,
+         Count > nc)
+
+pList <- enrichDF2 %>%
+  group_by(Category,Cluster) %>%
+  arrange(Adjusted.P.value,desc(Combined.Score)) %>%
+  top_n(topf) %>%
+  ungroup() %>%
+  group_split(Category) %>%
+  setNames(levels(enrichDF2$Category)) %>%
+  map(~ .x %>%
+        group_split(Cluster) %>%
+        map(~ .x %>%
+  ggplot(aes(x=reorder(Term, Combined.Score),
+             y=Combined.Score,fill=zscore)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  ggtitle(unique(.$Cluster),subtitle = unique(.$Category)) +
+  geom_text(color = "black",
+            aes(x = reorder(Term, Combined.Score),
+                y = Combined.Score, label = Count),
+            position = position_stack(0.5)) +
+  scale_fill_gradient2(low = "blue",mid = "white",high = "red") +
+    theme_classic()
+))
+
+pNames <- list()
+slide_ids <- list()
+lastNumber <- 0
+
+for (catg in names(pList)) {
+  lapply(pList[[catg]],print)
+  pNumber <- seq(from = lastNumber + 1, to = length(pList[[catg]]) + lastNumber)
+  lastNumber <- pNumber[length(pNumber)]
+  pNames[[catg]] <- knitr::fig_path(suffix = ".jpeg", options = knitr::opts_current$get(),pNumber)
+  slide_ids[[catg]] <- paste0(catg,sub(".+-(\\d+)$$","\\1",knitr::opts_current$get()$label))
+}
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-53, fig.width=12, fig.asp=0.6, include=toInclude}
+
+topf <- 10
+
+samplesExprs <- AverageExpression(seuratSC, group.by = clustering)$RNA %>%
+  as.data.frame() %>%
+  mutate(gene=toupper(rownames(.))) %>%
+  as_tibble()
+  
+myContrasts <- levels(enrichDF$Cluster)
+rowAnnotations <- c("zscore", "Adjusted.P.value", "Combined.Score")
+colAnnotations <- c("Cluster")
+
+nplots <- 0
+for (c in myContrasts) {
+  
+  # Compute Overlaps
+  a <- enrichDF2 %>%
+    filter(Cluster == c) %>%
+    group_by(Category,Cluster) %>%
+    arrange(Adjusted.P.value,desc(Combined.Score)) %>%
+    top_n(topf) %>%
+    ungroup() %>%
+    separate_rows(Genes,sep = ",") %>%
+    mutate(n=1) %>%
+    dplyr::select(Genes,TermID,n) %>%
+    pivot_wider(names_from = TermID, values_from = n, values_fill = 0) %>%
+    dplyr::select(-Genes) %>%
+    as.matrix() %>%
+    crossprod()
+  a <- a/diag(a)
+  
+  if (dim(a)[1] >= 2) { # If I have at least two terms
+    
+    nplots <- nplots + 1
+    
+    # Hierarchical Clustering of Terms by Overlaps
+    if (any(is.na(as.dist(sqrt(2*dim(a)[2]*(1-cor(t(a)))))))) {
+      rowv <- as.dendrogram(hclust(as.dist(t(a))))
+    } else {
+      rowv <- as.dendrogram(hclust(as.dist(sqrt(2*dim(a)[2]*(1-cor(t(a))))), method="average"))
+    }
+    
+    # Filter enrichDF to get data from cluster
+    myDF <- enrichDF2 %>%
+      ungroup() %>%
+      filter(Cluster == c) %>%
+      filter(TermID %in% rownames(a)) %>%
+      mutate(TermID = factor(TermID,levels = rownames(a))) %>%
+      mutate(Term = paste0(abrv,
+                           ":(",Count,")",
+                           Term)
+               ) %>%
+      arrange(TermID)
+    
+    # Obtain Avr(LogFC) of the Term Genes for each cluster
+    ck <- myDF %>%
+      filter(Cluster == c) %>%
+      separate_rows(Genes,sep=", ") %>%
+      left_join(samplesExprs, by = c("Genes"="gene")) %>%
+      dplyr::select(all_of(c("TermID",myContrasts))) %>%
+      dplyr::group_by(TermID) %>%
+      summarise_all(mean)
+    
+    ck <- as.data.frame(ck,stringAsFactors=F)
+    rownames(ck) <- ck$TermID
+    ck$TermID <- NULL
+    cks <- as.matrix(ck)
+    cks <- cks[match(rownames(a),rownames(cks)),]
+    cks <- log1p(cks)
+    cks <- t(scale(t(cks)))
+    
+    # Compute quantiles for LFC color scale
+    maxq <- quantile(unlist(cks),probs=c(0.01,0.99))
+    
+    # Change rownames to modyfied Term
+    rownames(a) <- myDF$Term
+    rownames(cks) <- rownames(a)
+    
+    # Reduce Term text size if very long
+    maxL <- max(sapply(myDF$Term, nchar))
+    if (dim(a)[1] >= 50 | maxL > 60) {fsize <- 8} else { fsize <- NULL}
+    
+    # Top Annotation
+    tha <- HeatmapAnnotation(
+      df = data.frame(Cluster = colnames(cks)),
+      col = list(
+        Cluster = setNames(color.list[seq(length(colnames(cks)))],
+                           colnames(cks))
+      ),
+      show_legend = F
+    )
+    htm1 <- Heatmap(cks
+                    ,cluster_rows = rowv
+                    ,cluster_columns = F
+                    ,name = "htm1"
+                    ,col = colorRamp2(seq(maxq[1],maxq[2],
+                                          by = (maxq[2]-maxq[1])/10),
+                                      rev(brewer.pal(11 , "Spectral" )))
+                    ,show_row_names = F
+                    ,show_row_dend = T
+                    ,show_heatmap_legend = T
+                    ,top_annotation = tha
+                    ,heatmap_legend_param = list(title = "Log(AvrExp)"
+                                                 , legend_direction="horizontal"
+                    )
+                    ,width = ncol(cks)*unit(5, "mm")
+    )
+    
+    # Row Annotations to add significance of enrichment, score and zscore of the LFC
+    rha = rowAnnotation(
+      df = myDF %>%
+        dplyr::select(all_of(rowAnnotations)) %>%
+        as.data.frame(),
+      col=list(
+        zscore = colorRamp2(c(-10,0,5), c("blue","white","red")),
+        Adjusted.P.value = colorRamp2(c(0,0.05),c("yellow","black")),
+        Combined.Score = colorRamp2(c(min(myDF$Combined.Score),
+                                      max(myDF$Combined.Score)),
+                                    c("blue","yellow"))
+        ),
+      annotation_legend_param = list(legend_direction="horizontal")
+      )
+    
+    htm2 <- Heatmap(as.matrix(a)
+                    ,cluster_rows = rowv
+                    ,cluster_columns = rowv
+                    ,col = colorRamp2(c(0,max(a,na.rm = T)),c("white","purple"))
+                    ,na_col = "grey90"
+                    ,row_names_side = "right"
+                    ,row_dend_reorder = F
+                    ,column_dend_reorder = F
+                    ,show_row_names = T
+                    ,show_row_dend = T
+                    ,show_column_names = T
+                    ,show_heatmap_legend = T
+                    ,column_names_gp = gpar(fontsize = 4)
+                    ,row_names_gp = gpar(fontsize = fsize)
+                    ,width = ncol(cks)*unit(7, "mm")
+                    ,right_annotation = rha
+                    ,name = "% Gene Overlap"
+                    ,column_title = c
+                    ,heatmap_legend_param = list(title = "% Gene Overlap"
+                                                 , legend_direction="horizontal"
+                    )
+    )
+    
+    draw(htm1+htm2,  main_heatmap = "% Gene Overlap",  heatmap_legend_side = "bottom", annotation_legend_side = "left")
+    
+  }
+  
+}
+
+pNames[["heatmap"]] <-  knitr::fig_path(suffix = ".jpeg", options = knitr::opts_current$get(),seq(nplots))
+slide_ids[["heatmap"]] <- paste0("heatmap",sub(".+-(\\d+)$$","\\1",knitr::opts_current$get()$label))
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-54}
+slicks <- lapply(names(pNames),FUN = function(x){
+  slickR(obj = pNames[[x]],
+         slideId = slide_ids[[x]],
+         height = 600,
+         width = '100%') + 
+    settings(lazyLoad = 'ondemand',
+             slidesToShow = 1,
+             adaptiveHeight = T,
+             # centerMode = F,
+             dots = T
+    )
+})
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-55}
+slicks[[1]] %synch% Reduce(`%stack%`,slicks[2:length(slicks)])
+```
+
+<!-- ## Differences Between Conditions -->
+
+<!-- The following contrasts will be applied per cluster -->
+
+```{r SCAV4.Lalaguna.Integrated.merge-56}
+# contrastList <- list(
+#                      Condition = list(TMEM42MutvsWT = c("Mut","WT"))
+#                      )
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-57}
+# contrastList %>%
+#   map(~ .x %>%
+#         map(~ .x %>%
+#               paste(.,collapse = "-")
+#         ) %>%
+#         bind_rows(.id = 'id') %>%
+#         pivot_longer(cols = everything(),
+#                      names_to = "ContrastName",
+#                      values_to = "Contrast")
+#   ) %>%
+#   bind_rows(.id = 'id') %>%
+#   rename(ContrastFactor = "id") %>%
+#   knitr::kable()
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-58}
+# # res <- 0.15
+# tde.files <- NULL
+# contrastByCond <- list()
+# useAssay <- "RNA"
+# clustering <- "res.Final"
+# testUse <- "MAST"
+# minPct <- 0.1
+# latvars <- c()
+# 
+# DefaultAssay(seuratSC) <- useAssay
+# Idents(seuratSC) <- clustering
+```
+
+```{r btwnConditions}
+
+# for (contrastFactor in names(contrastList)) {
+#   
+#   dir.create(file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName),recursive = T)
+#   
+#   if (file.exists(file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName,paste(prefix,paste0("ContrastBy",contrastFactor),subsetName,cellSet,clustering,testUse,"rds",sep=".")))) {
+#     
+#     message(paste("Load Contrasts by",contrastFactor,"from file:",file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName,paste(prefix,paste0("ContrastBy",contrastFactor),subsetName,cellSet,clustering,testUse,"rds",sep="."))))
+#     
+#     contrastByCond <- readRDS(file = file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName,paste(prefix,paste0("ContrastBy",contrastFactor),subsetName,cellSet,clustering,testUse,"rds",sep=".")))
+#     
+#   } else {
+#     
+#     if (useAssay == "RNA") {
+#       mExprs <- expm1(Seurat::Assays(seuratSC,slot = useAssay)@data)
+#     } else {
+#       mExprs <- Seurat::Assays(seuratSC,slot = useAssay)@data
+#     }
+#     
+#     for (contrast in names(contrastList[[contrastFactor]])) {
+#       
+#       cond1 <- contrastList[[contrastFactor]][[contrast]][1]
+#       cond2 <- contrastList[[contrastFactor]][[contrast]][2]
+#       
+#       message(contrast)
+#       
+#       dir.create(file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName,contrast),recursive = T)
+#       
+#       clusters <- mixedsort(levels(Idents(seuratSC)))
+#       clusterIdents <- Idents(seuratSC)
+#       namesIdent <- names(clusterIdents)
+#       resData <- factor(paste(clusterIdents,seuratSC@meta.data[namesIdent,contrastFactor],sep="."))
+#       names(resData) <- namesIdent
+#       seuratSC <- SetIdent(seuratSC,value = resData)
+#       
+#       contrastByCond[[contrastFactor]][[contrast]] <- list()
+#       
+#       minCells <- 3
+#       
+#       for (cluster in clusters) {
+#         
+#         message(cluster)
+#         
+#         ident1 <- paste(cluster,cond1,sep=".")
+#         ident2 <- paste(cluster,cond2,sep=".")
+#         
+#         if (sum(Idents(seuratSC) == ident1) < minCells |
+#             sum(Idents(seuratSC) == ident2) < minCells) {
+#           message("Not enough Cells to contrast")
+#           next
+#         }
+#         
+#         myContrast <- FindMarkers(seuratSC
+#                                   , assay = useAssay
+#                                   , slot = "data"
+#                                   , ident.1 = ident1
+#                                   , ident.2 = ident2
+#                                   , latent.vars = latvars
+#                                   , min.pct = minPct
+#                                   , test.use = testUse
+#         )
+#         myContrast <- myContrast %>%
+#           mutate(
+#             contrastFactor = contrastFactor,
+#             contrast = contrast,
+#             cluster = cluster,
+#             gene = rownames(myContrast)) %>%
+#           mutate(
+#             "exp_{cond1}" := rowMeans(mExprs[gene,Idents(seuratSC) == ident1]),
+#             "exp_{cond2}" := rowMeans(mExprs[gene,Idents(seuratSC) == ident2]),
+#             "n_{cond1}" := sum(Idents(seuratSC) == ident1),
+#             "n_{cond2}" := sum(Idents(seuratSC) == ident2),
+#           ) %>%
+#           rename(
+#             "pct_{cond1}" := "pct.1",
+#             "pct_{cond2}" := "pct.2"
+#           ) %>%
+#           left_join(genesMetadataInExperiment %>%
+#                       dplyr::select(uniq_name,ensembl_gene_id),
+#                     by = c("gene"="uniq_name")) %>%
+#           dplyr::select(contrastFactor,contrast,cluster,gene,avg_log2FC,p_val_adj,everything()) %>%
+#           mutate(GeneCardLink = paste0(geneCardUrl, gene),
+#                  ensemblLink = paste0(ensemblUrl, ensembl_gene_id)
+#           )
+#         class(myContrast$GeneCardLink) <- "hyperlink"
+#         class(myContrast$ensemblLink) <- "hyperlink"
+#         
+#         
+#         contrastByCond[[contrastFactor]][[contrast]][[cluster]] <- myContrast
+#         
+#       }
+#       
+#       ################## CONTRAST ALL CELLS ######################
+#       ident1 <- cond1
+#       ident2 <- cond2
+#       
+#       resData <- factor(seuratSC@meta.data[namesIdent,contrastFactor])
+#       names(resData) <- namesIdent
+#       seuratSC <- SetIdent(seuratSC,value = resData)
+#       
+#       myContrast <- FindMarkers(seuratSC
+#                                 , assay = useAssay
+#                                 , ident.1 = ident1
+#                                 , ident.2 = ident2
+#                                 , slot = "data"
+#                                 , latent.vars = latvars
+#                                 , min.pct = 0.3
+#                                 , test.use = testUse
+#                                 , verbose = F
+#       )
+#       myContrast <- myContrast %>%
+#         mutate(
+#           contrastFactor = contrastFactor,
+#           contrast = contrast,
+#           cluster = "All",
+#           gene = rownames(myContrast)) %>%
+#         mutate(
+#           "exp_{cond1}" := rowMeans(mExprs[gene,Idents(seuratSC) == ident1]),
+#           "exp_{cond2}" := rowMeans(mExprs[gene,Idents(seuratSC) == ident2]),
+#           "n_{cond1}" := sum(Idents(seuratSC) == ident1),
+#           "n_{cond2}" := sum(Idents(seuratSC) == ident2),
+#         ) %>%
+#         rename(
+#           "pct_{cond1}" := "pct.1",
+#           "pct_{cond2}" := "pct.2"
+#         ) %>%
+#         left_join(genesMetadataInExperiment %>%
+#                     dplyr::select(uniq_name,ensembl_gene_id),
+#                   by = c("gene"="uniq_name")) %>%
+#         dplyr::select(cluster,gene,avg_log2FC,p_val_adj,everything()) %>%
+#         mutate(GeneCardLink = paste0(geneCardUrl, gene),
+#                ensemblLink = paste0(ensemblUrl, ensembl_gene_id)
+#         )
+#       class(myContrast$GeneCardLink) <- "hyperlink"
+#       class(myContrast$ensemblLink) <- "hyperlink"
+#       
+#       contrastByCond[[contrastFactor]][[contrast]][["All"]] <- myContrast
+#       
+#       Idents(seuratSC) <- clustering
+#       
+#       write.xlsx(contrastByCond[[contrastFactor]][[contrast]],file = file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName,contrast,paste(paste0("ContrastBy",contrastFactor),subsetName,cellSet,clustering,contrast,testUse,"xlsx",sep=".")),overwrite=T)
+#       
+#     }
+#     
+#     saveRDS(contrastByCond,file = file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName,paste(prefix,paste0("ContrastBy",contrastFactor),subsetName,cellSet,clustering,testUse,"rds",sep=".")))
+#     
+#   }
+# }
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-59}
+# 
+# maxPval <- 0.05
+# 
+# cByConds <- NULL
+# 
+# cByConds <- contrastByCond %>%
+#   map(~ .x %>%
+#         map( ~ .x %>%
+#                bind_rows()
+#         ) %>%
+#         bind_rows
+#       ) %>%
+#   bind_rows() %>%
+#   mutate(cluster = factor(cluster)) %>%
+#   mutate(cluster = factor(cluster,levels = mixedsort(levels(cluster))))
+# 
+# diffByConds <- cByConds %>%
+#   mutate(contrast=paste(contrastFactor,contrast,sep="_")) %>%
+#   filter(p_val_adj < maxPval) %>%
+#   dplyr::select(contrast,cluster) %>%
+#   group_by(contrast,cluster) %>% table
+# knitr::kable(diffByConds, caption = paste("Genes signiciantly difference between conditions for each cluster at adjusted p-value <",maxPval)) %>%
+#   kable_styling(latex_options = c("hold_position"),position = "center")
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-60}
+
+# tde.files <- data.frame(Factor=c(),Contrast=c(),File=c())
+# for (f in names(contrastList)) {
+#   
+#     tde.files <- rbind(tde.files,
+#                        data.frame(Factor = rep(f,length(contrastList[[f]])),
+#                                   Contrast=names(contrastList[[f]]),
+#                                   File=file.path(paste0("ContrastBy",f),subsetName,names(contrastList[[f]]),paste(paste0("ContrastBy",f),subsetName,cellSet,clustering,names(contrastList[[f]]),testUse,"xlsx",sep=".")))
+#     )
+# }
+# 
+# datatable(tde.files %>% dplyr::mutate(File = paste0("<a href='",tde.files$File,"'>",tde.files$File,"</a>"))
+#           ,caption = "Excel Files with results from Contrasts"
+#           , escape = FALSE
+#           , options = list(
+#             searching = FALSE,
+#             ordering = F,
+#             info = F,
+#             paging = F,
+#             scrollX = F
+#           )
+# )
+
+```
+
+<!-- ### Functional Analysis -->
+
+```{r SCAV4.Lalaguna.Integrated.merge-61, include=FALSE}
+
+# ntop <- 150
+# 
+# setEnrichrSite("Enrichr")
+# 
+# websiteLive <- TRUE
+# 
+# dbs <- listEnrichrDbs()
+# 
+# if (is.null(dbs)) websiteLive <- FALSE
+# 
+# if (websiteLive) head(dbs)
+# 
+# dbs <- data.frame(dbs=c(
+#   "TRRUST_Transcription_Factors_2019"
+#   ,"GO_Biological_Process_2018"
+#   ,"GO_Molecular_Function_2018"
+#   ,"GO_Cellular_Component_2018"
+#   ,"KEGG_2019_Mouse"
+#   ,"KEGG_2019_Human"
+#   ,"WikiPathways_2019_Mouse"
+#   ,"WikiPathways_2019_Human"
+#   # ,"Enrichr_Users_Contributed_Lists_2020"
+# ),
+# abrv=c(
+#   "TRR"
+#   ,"BP"
+#   ,"MF"
+#   ,"CC"
+#   ,"KPM"
+#   ,"KPH"
+#   ,"WPM"
+#   ,"WPH"
+#   # ,"EUC"
+# ),
+# stringsAsFactors=F
+# )
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-62, include=FALSE}
+
+# enrichDFList <- list()
+# 
+# for (contrastFactor in names(contrastList)) {
+#   
+#   enrichDFList[[contrastFactor]] <- list()
+#   
+#   for (contrast in names(contrastList[[contrastFactor]])) {
+#     
+#     enrichDFList[[contrastFactor]][[contrast]] <- list()
+#     
+#     cond1 <- contrastList[[contrastFactor]][[contrast]][1]
+#     cond2 <- contrastList[[contrastFactor]][[contrast]][2]
+#     
+#     dir.create(file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName,contrast,"enrichR"),showWarnings = T,recursive = T)
+#     
+#     if (file.exists(file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName,contrast,"enrichR",paste(subsetName,cellSet,clustering,contrastFactor,contrast,"EnrichR","rds",sep=".")))) {
+#       
+#       message(paste("Load enrichment from:",file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName,contrast,"enrichR",paste(subsetName,cellSet,clustering,contrastFactor,contrast,"EnrichR","rds",sep="."))))
+#       
+#       enrichDFList[[contrastFactor]][[contrast]] <- readRDS(file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName,contrast,"enrichR",paste(subsetName,cellSet,clustering,contrastFactor,contrast,"EnrichR","rds",sep=".")))
+#       
+#     } else {
+#       
+#       enrichList <- cByConds %>%
+#         filter(contrastFactor == contrastFactor,
+#                contrast == contrast) %>%
+#         group_split(cluster,.keep = T) %>%
+#         map(~ .x %>%
+#               filter(p_val_adj < pval) %>%
+#               top_n(ntop,abs(avg_log2FC))
+#         ) %>%
+#         map(~ .x$gene %>%
+#               enrichr(.,dbs$dbs)
+#         ) %>%
+#         setNames(levels(cByConds$cluster))
+#       
+#       # Unlist results to a table
+#       enrichDF <- enrichList %>%
+#         map(~ .x %>%
+#               discard(~ is.null(.x)) %>%
+#               discard(~ dim(.x)[1] == 0) %>%
+#               bind_rows(.,.id = "Category")
+#         ) %>%
+#         bind_rows(.id = "Cluster") %>%
+#         mutate(contrastFactor = contrastFactor,
+#                contrast = contrast) %>%
+#         dplyr::select(contrastFactor,contrast,Cluster,
+#                       everything(),
+#                       -contains("Old"))
+#       
+#       # Create IDTerm column when present (i.e. GO Terms and WikiPathways)
+#       enrichDF <- enrichDF %>%
+#         as_tibble() %>%
+#         mutate(Term = sub("(WP\\d+)$","|\\1",Term,perl = T)) %>%
+#         mutate(Term = sub("\\)$","",Term)) %>%
+#         mutate(Term = sub("\\((GO\\:)","|\\1",Term,perl = T)) %>%
+#         separate(Term,into = c("Term","TermID"),sep = "\\|",fill = "right")
+#       
+#       # Add TermID when missing
+#       enrichDF <- enrichDF %>%
+#         left_join(dbs,by = c("Category"="dbs")) %>%
+#         group_by(Category) %>%
+#         mutate(ID = as.numeric(factor(Term))) %>%
+#         ungroup() %>%
+#         mutate(TermID = ifelse(is.na(TermID),
+#                                paste0(abrv,ID),
+#                                TermID)
+#         ) %>%
+#         dplyr::select(-ID)
+#       
+#       # Factorize Cluster column and remove some columns
+#       enrichDF <- enrichDF %>%
+#         mutate(Cluster = factor(Cluster)) %>%
+#         mutate(Cluster = factor(Cluster,levels = mixedsort(levels(Cluster)))) %>%
+#         separate(Overlap, into = c("Count","Pop.Hits")) %>%
+#         dplyr::select(-contains("Old"))
+#       
+#       saveRDS(enrichDF,file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName,contrast,"enrichR",paste(subsetName,cellSet,clustering,contrastFactor,contrast,"EnrichR","rds",sep=".")))
+#       
+#       enrichDFList[[contrastFactor]][[contrast]] <- enrichDF
+#     }
+#   }
+# }
+# 
+# for (myContrastFactor in names(enrichDFList)) {
+#   for (myContrast in names(enrichDFList[[myContrastFactor]])) {
+#     write.xlsx(enrichDFList[[myContrastFactor]][[myContrast]],
+#                file = file.path(outputPath,paste0("ContrastBy",contrastFactor),subsetName,contrast,"enrichR",paste(subsetName,cellSet,clustering,contrastFactor,contrast,"EnrichR","xlsx",sep=".")),
+#                overwrite = T)
+#   }
+# }
+
+```
+
+<!-- Functional enrichment results for contrasts can be found here: -->
+
+```{r SCAV4.Lalaguna.Integrated.merge-63}
+# tde.files <- data.frame(Factor=c(),Contrast=c(),File=c())
+# for (f in names(contrastList)) {
+#   
+#     tde.files <- rbind(tde.files,
+#                        data.frame(Factor = rep(f,length(contrastList[[f]])),
+#                                   Contrast=names(contrastList[[f]]),
+#                                   File=file.path(paste0("ContrastBy",contrastFactor),subsetName,contrast,"enrichR",paste(subsetName,cellSet,clustering,contrastFactor,contrast,"EnrichR","xlsx",sep=".")))
+#     )
+# }
+# 
+# datatable(tde.files %>% dplyr::mutate(File = paste0("<a href='",tde.files$File,"'>",tde.files$File,"</a>"))
+#           ,caption = "Excel Files with results from Functional Enrichments"
+#           , escape = FALSE
+#           , options = list(
+#             searching = FALSE,
+#             ordering = F,
+#             info = F,
+#             paging = F,
+#             scrollX = F
+#           )
+# )
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-64}
+
+# enrichDF2 <- enrichDFList %>%
+#   map(~ .x %>%
+#         map(~ .x %>%
+#               bind_rows()
+#             ) %>%
+#         bind_rows
+#       ) %>%
+#   bind_rows() %>%
+#   filter(Count > 1) %>%
+#   separate_rows(Genes,sep = ";") %>%
+#   left_join(cByConds %>%
+#               mutate(gene=toupper(gene)) %>%
+#               dplyr::select(contrastFactor,contrast,
+#                             cluster,gene,avg_log2FC),
+#             by = c("contrastFactor"="contrastFactor",
+#                    "contrast"="contrast",
+#                    "Cluster"="cluster",
+#                    "Genes"="gene")) %>%
+#   group_by(Category,Term,contrastFactor,contrast,Cluster) %>%
+#   summarise(
+#     across(.cols = -starts_with(c("Genes","avg_log2FC")),
+#                                  .fns = unique),
+#     zscore=mean(avg_log2FC,na.rm = T)/sd(avg_log2FC,na.rm = T),
+#     Genes=toString(Genes)
+#     ) %>%
+#   ungroup()
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-65, include=toInclude}
+
+# pval <- 0.05
+# nc <- 3
+# topf <- 20
+# 
+# enrichDF2 <- enrichDF2 %>%
+#   mutate(Category = factor(Category)) %>%
+#   filter(Adjusted.P.value < pval,
+#          Count > nc)
+# 
+# pList <- enrichDF2 %>%
+#   group_by(Category,contrastFactor,contrast,Cluster) %>%
+#   arrange(Adjusted.P.value,desc(Combined.Score)) %>%
+#   top_n(topf) %>%
+#   ungroup() %>%
+#   group_split(Category) %>%
+#   setNames(levels(enrichDF2$Category)) %>%
+#   map(~ .x %>%
+#         group_split(contrastFactor,contrast,Cluster) %>%
+#         map(~ .x %>%
+#   ggplot(aes(x=reorder(Term, Combined.Score),
+#              y=Combined.Score,fill=zscore)) +
+#   geom_bar(stat = "identity") +
+#   coord_flip() +
+#   ggtitle(paste(unique(.$contrastFactor),
+#                 unique(.$contrast),
+#                 unique(.$Cluster),sep = "."),
+#           subtitle = unique(.$Category)) +
+#   geom_text(color = "black",
+#             aes(x = reorder(Term, Combined.Score),
+#                 y = Combined.Score, label = Count),
+#             position = position_stack(0.5)) +
+#   scale_fill_gradient2(low = "blue",mid = "white",high = "red") +
+#     theme_classic()
+# ))
+# 
+# pNames <- list()
+# slide_ids <- list()
+# lastNumber <- 0
+# 
+# for (catg in names(pList)) {
+#   lapply(pList[[catg]],print)
+#   pNumber <- seq(from = lastNumber + 1, to = length(pList[[catg]]) + lastNumber)
+#   lastNumber <- pNumber[length(pNumber)]
+#   pNames[[catg]] <- knitr::fig_path(suffix = ".jpeg", options = knitr::opts_current$get(),pNumber)
+#   slide_ids[[catg]] <- paste0(catg,sub(".+-(\\d+)$$","\\1",knitr::opts_current$get()$label))
+# }
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-66, fig.width=12, fig.asp=0.6, include=toInclude}
+
+# topf <- 10
+# nplots <- 0
+# rowAnnotations <- c("zscore", "Adjusted.P.value", "Combined.Score")
+# colAnnotations <- c("Cluster")
+# 
+# samplesExprs <- AverageExpression(seuratSC, group.by = clustering)$RNA %>%
+#   as.data.frame() %>%
+#   mutate(gene=toupper(rownames(.))) %>%
+#   as_tibble()
+# 
+# for (myContrastFactor in levels(factor(enrichDF2$contrastFactor))) {
+#   
+#   enrichDFByCF <- enrichDF2 %>%
+#     filter(contrastFactor == myContrastFactor)
+#   
+#   for (myContrast in levels(factor(enrichDFByCF$contrast))) {
+#     
+#     enrichDFByCFC <- enrichDF2 %>%
+#       filter(contrastFactor == myContrastFactor,
+#              contrast == myContrast)
+#     
+#     for (myCluster in levels(enrichDF$Cluster)) {
+#       
+#       # Compute Overlaps
+#       a <- enrichDFByCFC %>%
+#         filter(Cluster == myCluster) %>%
+#         group_by(Category,Cluster) %>%
+#         arrange(Adjusted.P.value,desc(Combined.Score)) %>%
+#         top_n(topf) %>%
+#         ungroup() %>%
+#         separate_rows(Genes,sep = ",") %>%
+#         mutate(n=1) %>%
+#         dplyr::select(Genes,TermID,n) %>%
+#         pivot_wider(names_from = TermID, values_from = n, values_fill = 0) %>%
+#         dplyr::select(-Genes) %>%
+#         as.matrix() %>%
+#         crossprod()
+#       a <- a/diag(a)
+#       
+#       if (dim(a)[1] >= 2) { # If I have at least two terms
+#         
+#         nplots <- nplots + 1
+#         
+#         # Hierarchical Clustering of Terms by Overlaps
+#         if (any(is.na(as.dist(sqrt(2*dim(a)[2]*(1-cor(t(a)))))))) {
+#           rowv <- as.dendrogram(hclust(as.dist(t(a))))
+#         } else {
+#           rowv <- as.dendrogram(hclust(as.dist(sqrt(2*dim(a)[2]*(1-cor(t(a))))), method="average"))
+#         }
+#         
+#         # Filter enrichDF to get data from cluster
+#         myDF <- enrichDFByCFC %>%
+#           ungroup() %>%
+#           filter(Cluster == myCluster) %>%
+#           filter(TermID %in% rownames(a)) %>%
+#           mutate(TermID = factor(TermID,levels = rownames(a))) %>%
+#           mutate(Term = paste0(abrv,
+#                                ":(",Count,")",
+#                                Term)
+#           ) %>%
+#           arrange(TermID)
+#         
+#         # Obtain Avr(LogFC) of the Term Genes for each cluster
+#         ck <- myDF %>%
+#           filter(Cluster == myCluster) %>%
+#           separate_rows(Genes,sep=", ") %>%
+#           left_join(samplesExprs, by = c("Genes"="gene")) %>%
+#           dplyr::select(all_of(c("TermID",levels(enrichDFByCFC$Cluster)[-1]))) %>%
+#           dplyr::group_by(TermID) %>%
+#           summarise_all(mean)
+#         
+#         ck <- as.data.frame(ck,stringAsFactors=F)
+#         rownames(ck) <- ck$TermID
+#         ck$TermID <- NULL
+#         cks <- as.matrix(ck)
+#         cks <- cks[match(rownames(a),rownames(cks)),]
+#         cks <- log1p(cks)
+#         cks <- t(scale(t(cks)))
+#         
+#         # Compute quantiles for LFC color scale
+#         maxq <- quantile(unlist(cks),probs=c(0.01,0.99))
+#         
+#         # Change rownames to modyfied Term
+#         rownames(a) <- myDF$Term
+#         rownames(cks) <- rownames(a)
+#         
+#         # Reduce Term text size if very long
+#         maxL <- max(sapply(myDF$Term, nchar))
+#         if (dim(a)[1] >= 50 | maxL > 60) {fsize <- 8} else { fsize <- NULL}
+#         
+#         # Top Annotation
+#         tha <- HeatmapAnnotation(
+#           df = data.frame(Cluster = colnames(cks)),
+#           col = list(
+#             Cluster = setNames(color.list[seq(length(colnames(cks)))],
+#                                colnames(cks))
+#           ),
+#           show_legend = F
+#         )
+#         htm1 <- Heatmap(cks
+#                         ,cluster_rows = rowv
+#                         ,cluster_columns = F
+#                         ,name = "htm1"
+#                         ,col = colorRamp2(seq(maxq[1],maxq[2],
+#                                               by = (maxq[2]-maxq[1])/10),
+#                                           rev(brewer.pal(11 , "Spectral" )))
+#                         ,show_row_names = F
+#                         ,show_row_dend = T
+#                         ,show_heatmap_legend = T
+#                         ,top_annotation = tha
+#                         ,heatmap_legend_param = list(title = "Log(AvrExp)"
+#                                                      , legend_direction="horizontal"
+#                         )
+#                         ,width = ncol(cks)*unit(5, "mm")
+#         )
+#         
+#         # Row Annotations to add significance of enrichment, score and zscore of the LFC
+#         rha = rowAnnotation(
+#           df = myDF %>%
+#             dplyr::select(all_of(rowAnnotations)) %>%
+#             as.data.frame(),
+#           col=list(
+#             zscore = colorRamp2(c(-10,0,5), c("blue","white","red")),
+#             Adjusted.P.value = colorRamp2(c(0,0.05),c("yellow","black")),
+#             Combined.Score = colorRamp2(c(min(myDF$Combined.Score),
+#                                           max(myDF$Combined.Score)),
+#                                         c("blue","yellow"))
+#           ),
+#           annotation_legend_param = list(legend_direction="horizontal")
+#         )
+#         
+#         htm2 <- Heatmap(as.matrix(a)
+#                         ,cluster_rows = rowv
+#                         ,cluster_columns = rowv
+#                         ,col = colorRamp2(c(0,max(a,na.rm = T)),c("white","purple"))
+#                         ,na_col = "grey90"
+#                         ,row_names_side = "right"
+#                         ,row_dend_reorder = F
+#                         ,column_dend_reorder = F
+#                         ,show_row_names = T
+#                         ,show_row_dend = T
+#                         ,show_column_names = T
+#                         ,show_heatmap_legend = T
+#                         ,column_names_gp = gpar(fontsize = 4)
+#                         ,row_names_gp = gpar(fontsize = fsize)
+#                         ,width = ncol(cks)*unit(7, "mm")
+#                         ,right_annotation = rha
+#                         ,name = "% Gene Overlap"
+#                         ,column_title = paste(myContrastFactor,
+#                                               myContrast,
+#                                               myCluster,sep=".")
+#                         ,heatmap_legend_param = list(title = "% Gene Overlap"
+#                                                      , legend_direction="horizontal"
+#                         )
+#         )
+#         
+#         draw(htm1+htm2,  main_heatmap = "% Gene Overlap",  heatmap_legend_side = "bottom", annotation_legend_side = "left")
+#         
+#       }
+#       
+#     }
+#     
+#   }
+# }
+# 
+# pNames[["heatmap"]] <-  knitr::fig_path(suffix = ".jpeg", options = knitr::opts_current$get(),seq(nplots))
+# slide_ids[["heatmap"]] <- paste0("heatmap",sub(".+-(\\d+)$$","\\1",knitr::opts_current$get()$label))
+
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-67}
+# slicks <- lapply(names(pNames),FUN = function(x){
+#   slickR(obj = pNames[[x]],
+#          slideId = slide_ids[[x]],
+#          height = 600,
+#          width = '100%') + 
+#     settings(lazyLoad = 'ondemand',
+#              slidesToShow = 1,
+#              adaptiveHeight = T,
+#              # centerMode = F,
+#              dots = T
+#     )
+# })
+```
+
+```{r SCAV4.Lalaguna.Integrated.merge-68}
+# slicks[[1]] %synch% Reduce(`%stack%`,slicks[2:length(slicks)])
+```
+
+## Differences Between Clusters by Pairs
+
+```{r SCAV4.Lalaguna.Integrated.merge-69}
+tde.files <- NULL
+
+contrastType <- "DEbyPairs"
+cellSet <- "All"
+pval <- 0.05
+clustering <- "res.Final"
+testUse <- "MAST"
+latvars <- c()
+minPct <- 30
+Idents(seuratSC) <- clustering
+
+dir.create(file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType),recursive = T,showWarnings = F)
+
+```
+
+The following files contains the lists of differentialy expressed genes between any pair of clusters. Further comparisons using several clusters can be done on demand.
+
+This is intended especially for the comparinson between clusters of similar cell types like those of endothelial cells or cardiomyocites.
+
+You can find excel files with this contrasts in this directory [`r file.path("contrastsBtwnClusters",subsetName,contrastType)`](`r file.path("contrastsBtwnClusters",subsetName,contrastType)`)
+
+```{r SCAV4.Lalaguna.Integrated.merge-70 }
+
+if (file.exists(file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType,paste(contrastType,subsetName,cellSet,clustering,minPct,testUse,"rds",sep=".")))) {
+
+  message("Load DE Contrasts by Pairs from file :",file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType,paste(contrastType,subsetName,cellSet,clustering,minPct,testUse,"rds",sep=".")))
+
+  deByPairs <- readRDS(file = file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType,paste(contrastType,subsetName,cellSet,clustering,minPct,testUse,"rds",sep=".")))
+
+} else {
+
+  deByPairs <- list()
+  ndeGenes <- list()
+  clusters <- mixedsort(levels(Idents(seuratSC)))
+
+  mExprs <- expm1(Seurat::Assays(seuratSC,slot = useAssay)@data)
+
+  for (i in seq(from = 1, to = length(clusters)-1)) {
+
+    ident1 <- clusters[i]
+
+    for (i2 in seq(from = i+1, to = length(clusters))) {
+
+      ident2 <- clusters[i2]
+
+      contrastName <- paste0(ident1,"vs",ident2)
+      message(contrastName)
+
+      deByPairs[[contrastName]] <- FindMarkers(seuratSC
+                                               , assay = useAssay
+                                               , ident.1 = ident1
+                                               , ident.2 = ident2
+                                               , test.use = testUse
+                                               , latent.vars = latvars
+      )
+
+      deByPairs[[contrastName]] <- deByPairs[[contrastName]] %>%
+        mutate(cluster = contrastName,
+               gene = rownames(deByPairs[[contrastName]])) %>%
+        dplyr::select(cluster,gene,everything()) %>%
+        as_tibble() %>%
+        mutate(
+          "exp_{ident1}" := rowMeans(mExprs[gene, Idents(seuratSC) == ident1]),
+          "exp_{ident2}" := rowMeans(mExprs[gene, Idents(seuratSC) == ident2]),
+          "n_{ident1}" := sum(Idents(seuratSC) == ident1),
+          "n_{ident2}" := sum(Idents(seuratSC) == ident2),
+        ) %>%
+        rename("pct_{ident1}" := "pct.1",
+               "pct_{ident2}" := "pct.2") %>%
+        left_join(genesMetadata %>%
+                    dplyr::select(uniq_name,ensembl_gene_id),
+                  by = c("gene"="uniq_name")) %>%
+        dplyr::select(cluster,gene,avg_log2FC,p_val_adj,everything()) %>%
+        mutate(GeneCardLink = paste0(geneCardUrl, gene),
+               ensemblLink = paste0(ensemblUrl, ensembl_gene_id)
+        )
+      class(deByPairs[[contrastName]]$GeneCardLink) <- "hyperlink"
+      class(deByPairs[[contrastName]]$ensemblLink) <- "hyperlink"
+
+      deByPairs[[contrastName]][deByPairs[[contrastName]]$p_val < pval,]
+
+    }
+  }
+
+  saveRDS(deByPairs, file = file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType,paste(contrastType,subsetName,cellSet,clustering,minPct,testUse,"rds",sep=".")))
+
+  for (contrast in names(deByPairs)) {
+
+    xlsList <- deByPairs[contrast]
+
+    write.xlsx(xlsList,file = file.path(outputPath,"contrastsBtwnClusters",subsetName,contrastType,paste(contrast,subsetName,cellSet,minPct,testUse,"xlsx",sep=".")), firstRow = T, firstCol = T)
+
+  }
+}
+
+for (contrast in names(deByPairs)) {
+
+  if (is.null(tde.files)) {
+
+    tde.files <- data.frame(Contrast=c(contrast),
+                            File=file.path("contrastsBtwnClusters",subsetName,contrastType,paste(contrast,subsetName,cellSet,minPct,testUse,"xlsx",sep="."))
+    )
+
+  } else {
+
+    tde.files <- rbind(tde.files,data.frame(Contrast=c(contrast),
+                                            File=file.path("contrastsBtwnClusters",subsetName,contrastType,paste(contrast,subsetName,cellSet,minPct,testUse,"xlsx",sep="."))
+    )
+    )
+
+  }
+}
+
+datatable(tde.files %>% dplyr::mutate(File = paste0("<a href='",tde.files$File,"'>",tde.files$File,"</a>"))
+          ,caption = "Excel Files with results from Contrasts"
+          , escape = FALSE
+          , options = list(
+            searching = FALSE,
+            ordering = F,
+            info = F,
+            paging = F,
+            scrollX = F
+          )
+)
+
+```
